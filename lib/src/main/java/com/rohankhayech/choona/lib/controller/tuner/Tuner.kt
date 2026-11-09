@@ -21,9 +21,7 @@ package com.rohankhayech.choona.lib.controller.tuner
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import be.tarsos.dsp.AudioDispatcher
-import be.tarsos.dsp.io.android.AudioDispatcherFactory
-import be.tarsos.dsp.pitch.AMDF
-import be.tarsos.dsp.pitch.PitchDetectionHandler
+import be.tarsos.dsp.io.TarsosDSPAudioInputStream
 import be.tarsos.dsp.pitch.PitchDetectionResult
 import com.rohankhayech.choona.lib.controller.tuner.Tuner.Companion.HIGHEST_NOTE
 import com.rohankhayech.choona.lib.controller.tuner.Tuner.Companion.LOWEST_NOTE
@@ -41,13 +39,65 @@ import kotlinx.coroutines.flow.update
  * The Guitar Tuner class is responsible for listening to incoming microphone audio
  * and comparing the currently playing note with the strings in the tuning.
  *
+ * ### Audio pipeline
+ * The microphone is captured at [TunerPipeline.SAMPLE_RATE] (44100 Hz), which keeps every harmonic
+ * of the highest detectable note far from the Nyquist frequency, and the audio is analysed in
+ * windows of [TunerPipeline.BUFFER_SIZE] (4096) samples that advance
+ * [TunerPipeline.BUFFER_OVERLAP] (2048) samples at a time. The overlap halves the latency without
+ * shortening the window, which is what lets the detector resolve the low strings: 4096 samples are
+ * roughly 93 ms, enough for several periods of the low E.
+ *
+ * Each frame travels through three stages, which [TunerPipeline.createDispatcher] adds in this
+ * order because processors run in the order they are added, on the audio thread:
+ *
+ * 1. A [SignalConditioner] removes the rumble and the mains hum, and publishes the level of the
+ *    frame it has just received.
+ * 2. A [be.tarsos.dsp.pitch.FastYin] detector estimates the frequency of the conditioned frame.
+ * 3. A [PitchTracker] turns the estimates into a stable offset, discarding the frames that cannot
+ *    hold a note, folding the octave errors and smoothing the result over a short window.
+ *
+ * [processPitch] is the entry point of the frames: the detector reports each one to it, together
+ * with the level published by the conditioner.
+ *
  * @param tuning The guitar tuning used for comparison.
+ * @param tracker The tracker that filters the frames reported by the detector.
+ * @param sourceFactory Test seam: opens the stream [start] analyses. The default is what the app
+ *                      uses, which is the microphone; it exists so that the lifecycle of
+ *                      [start]/[stop] can be exercised on the host JVM, where there is no
+ *                      `AudioRecord` to capture from.
+ * @param dispatcherFactory Test seam: builds the chain that runs over the stream [start] opened.
+ *                          The default is what the app uses; it exists so that a chain that fails
+ *                          to build can be exercised on the host JVM.
  *
  * @author Rohan Khayech
  */
-class Tuner(
-    tuning: Tuning = Tuning.STANDARD
-): TuningEditor(tuning) {
+class Tuner internal constructor(
+    tuning: Tuning,
+    private val tracker: PitchTracker,
+    private val sourceFactory: (sampleRateHz: Int, bufferSize: Int) -> TarsosDSPAudioInputStream =
+        { rate, size -> TunerAudioSource(rate, size) },
+    private val dispatcherFactory: (
+        TarsosDSPAudioInputStream,
+        (PitchDetectionResult, Float) -> Unit,
+    ) -> AudioDispatcher = { source, onFrame ->
+        TunerPipeline.createDispatcher(source, onFrame = onFrame)
+    },
+) : TuningEditor(tuning) {
+
+    /**
+     * Creates a tuner for the given [tuning].
+     *
+     * The tracker is given the range of notes the tuner can represent, so that a frame that lands
+     * outside of it, such as a harmonic several octaves above the plucked string, is discarded
+     * instead of moving the needle, while a note one octave above the ceiling of the range is folded
+     * onto the string it belongs to and shown after the frames the folding takes to confirm.
+     *
+     * @param tuning The guitar tuning used for comparison.
+     */
+    constructor(tuning: Tuning = Tuning.STANDARD) : this(
+        tuning,
+        PitchTracker(lowestNote = LOWEST_NOTE, highestNote = HIGHEST_NOTE),
+    )
 
     companion object {
 
@@ -57,12 +107,8 @@ class Tuner(
         /** Time in ms that a note must be held below the threshold for before being considered in tune. */
         const val TUNED_SUSTAIN_TIME = 900
 
-        // Audio Dispatcher Constants
-        /** Microphone sample rate. */
-        private const val SAMPLE_RATE = 22050
-
-        /** Audio buffer size. */
-        private const val AUDIO_BUFFER_SIZE = 1024
+        /** Maximum time to wait for the audio thread to finish when stopping. */
+        private const val STOP_JOIN_TIMEOUT_MS = 250L
 
         /** Index of the lowest detectable note. */
         val LOWEST_NOTE = Notes.getIndex("D1")
@@ -116,8 +162,19 @@ class Tuner(
     /** Whether the tuner is currently running. */
     private var running = false
 
+    /**
+     * Test seam: whether the tuner is currently listening to audio.
+     *
+     * The state is private, and the UI reads it through the [error] and the offsets the tuner
+     * publishes, so this accessor exists for the lifecycle tests alone.
+     */
+    internal val isRunning: Boolean get() = running
+
     /** Audio dispatcher used to receive incoming audio data.  */
     private var dispatcher: AudioDispatcher? = null
+
+    /** Thread running the [dispatcher], or `null` while the tuner is stopped. */
+    private var dispatcherThread: Thread? = null
 
     /** Mutable backing property for [error]. */
     private val _error = MutableStateFlow<Exception?>(null)
@@ -240,18 +297,49 @@ class Tuner(
     }
 
     /**
-     * Processes incoming pitch detection [results][result] and updates the offset
-     * between the currently playing note and the root note of the selected string.
+     * Processes an already detected [result], the compatibility entry point for a caller that
+     * brings its own detector.
+     *
+     * The level of the frame is unknown here, so it is not used to discard it: use the overload
+     * that receives it for the full filtering of the pipeline, which is the one
+     * [TunerPipeline.createDispatcher] reports the frames to and the one that can discard a frame
+     * the microphone captured below the noise floor.
+     *
+     * Everything else is decided by the [tracker] the tuner was built with, and applies here in the
+     * same way: a tuner built with the default tracker smooths the offsets over its window, folds
+     * the octave error and rejects the notes outside the detectable range.
+     *
+     * @param result The result reported by the pitch detector.
      */
-    fun processPitch(result: PitchDetectionResult) {
-        if (result.isPitched) {
-            // Calc note playing.
-            val notePlaying = Notes.getOffsetFromA4(result.pitch.toDouble())
+    fun processPitch(result: PitchDetectionResult) = processPitch(result, Float.NaN)
 
-            // Detect closest string/note in auto mode.
+    /**
+     * Processes a single pitch detection frame and updates the offset between the currently playing
+     * note and the root note of the selected string.
+     *
+     * The frame arrives already filtered by the confidence of the detector, which only reports a
+     * pitch whose clarity stays above `1 - [TunerPipeline.YIN_THRESHOLD]`: the filtering this method
+     * adds is the level of the frame, and the ones the [tracker] decides.
+     *
+     * @param result The result reported by the pitch detector.
+     * @param inputRms Level of the frame in the same scale as the received samples, or [Float.NaN]
+     *                 to leave the frame ungated by its level.
+     */
+    internal fun processPitch(result: PitchDetectionResult, inputRms: Float) {
+        val notePlaying = if (result.isPitched) {
+            tracker.process(result.pitch, inputRms, currentCandidates())
+        } else {
+            tracker.reset()
+            null
+        }
+
+        if (notePlaying != null) {
             if (autoDetect.value) {
                 if (chromatic.value) {
-                    val closestNote = notePlaying.roundToInt()
+                    // Defence in depth: a tracker built with the range of the tuner has already
+                    // discarded this frame, so the clamp only catches a tuner built without one. It
+                    // keeps the selection within the bounds the rest of the UI expects.
+                    val closestNote = notePlaying.roundToInt().coerceIn(LOWEST_NOTE, HIGHEST_NOTE)
                     if (selectedNote.value != closestNote) {
                         _noteTuned.update { false }
                     }
@@ -263,7 +351,6 @@ class Tuner(
                         )
                     }
                 }
-
             }
 
             // Update note offset.
@@ -272,6 +359,11 @@ class Tuner(
             _noteOffset.update { null }
         }
     }
+
+    /** Note indices of the strings of the tuning, or null in chromatic mode (disables octave folding). */
+    private fun currentCandidates(): IntArray? =
+        if (chromatic.value) null
+        else IntArray(tuning.value.numStrings()) { tuning.value.getString(it).getNoteIndex(0) }
 
     /** Returns the offset between the specified [note][notePlaying] and the root note of the selected string. */
     private fun calcNoteOffset(notePlaying: Double): Double {
@@ -288,6 +380,12 @@ class Tuner(
      * Starts listening to incoming audio and begins note comparison.
      * This process must be stopped by calling [stop] when finished.
      *
+     * The sample rate is never changed to fit the device: if the microphone cannot keep up with the
+     * requested buffer, only the buffer of the [android.media.AudioRecord] grows, which changes how
+     * much audio is captured before it is read and not the window that is analysed. The chain of
+     * processors is the one [TunerPipeline] builds, which is also where their order lives: the
+     * [AudioDispatcher] walks them in insertion order, on the audio thread.
+     *
      * @param ph The Android runtime permission handler.
      * @throws IllegalStateException If the RECORD_AUDIO permission is not granted, or the tuner has already started.
      * @throws TunerException If the tuner fails to start due to another error.
@@ -295,48 +393,64 @@ class Tuner(
      */
     @Throws(IllegalStateException::class, TunerException::class)
     fun start(ph: PermissionHandler) {
+        startWithPermissionCheck(checkingPermission = ph::check)
+    }
+
+    /**
+     * Starts listening to incoming audio, asking [checkingPermission] whether the tuner is allowed to
+     * capture it.
+     *
+     * This is the body of [start], which supplies the check of the [PermissionHandler], and it is a
+     * test seam, the app must always call [start] which checks the real permission. The name says so
+     * on purpose: a closure of this shape is easy to reach for from anywhere in the library as
+     * `startWithPermissionCheck { true }`, and that would capture audio without asking the user.
+     *
+     * It is the entry point of the lifecycle tests: a [PermissionHandler] cannot be built on the
+     * host JVM, since it registers an activity result launcher of an Android activity, and the
+     * lifecycle of [start]/[stop] is exactly what has to be covered.
+     *
+     * @param checkingPermission Returns whether the RECORD_AUDIO permission is currently granted.
+     * @throws IllegalStateException If [checkingPermission] returns `false`, or the tuner has
+     *                               already started.
+     * @throws TunerException If the tuner fails to start due to another error.
+     *                        The [error] property will also be set with this exception.
+     */
+    @Throws(IllegalStateException::class, TunerException::class)
+    internal fun startWithPermissionCheck(checkingPermission: () -> Boolean) {
         check(!running) { "Tuner already started." }
-        check(ph.check()) { "RECORD_AUDIO permission not granted." }
+        check(checkingPermission()) { "RECORD_AUDIO permission not granted." }
 
         running = true
         _error.update { null }
-        var bufferSize = AUDIO_BUFFER_SIZE
-        var sampleRate = SAMPLE_RATE
-        while (dispatcher == null) {
-            try {
-                // Create audio dispatcher from default microphone.
-                dispatcher = AudioDispatcherFactory.fromDefaultMicrophone(sampleRate, bufferSize, 0)
-
-                // Setup and add pitch processor.
-                val pdh = PitchDetectionHandler { result, _ -> processPitch(result) }
-                val pitchProcessor = PitchProcessor(
-                    AMDF(
-                        sampleRate.toFloat(),
-                        bufferSize,
-                        Notes.getPitch(LOWEST_NOTE),
-                        Notes.getPitch(HIGHEST_NOTE)
-                    ),
-                    pdh
-                )
-                dispatcher?.addAudioProcessor(pitchProcessor)
-
-                // Start the audio dispatcher (producer) thread.
-                Thread(dispatcher, "audio-dispatcher").start()
-            } catch(e: Exception) {
-                    // Extract the required buffer size from the exception message.
-                    val requiredBufferSize = e.message?.substringAfter("should be at least ")?.substringBefore("\n")?.trim()?.toIntOrNull()
-
-                    if (requiredBufferSize == null || requiredBufferSize == bufferSize) {
-                        // If we have tried the device's required buffer size and still failed, throw an exception.
-                        val err = TunerException(e.message, e)
-                        _error.update { err }
-                        running = false
-                        throw err
-                    } else {
-                        bufferSize = requiredBufferSize
-                        sampleRate = (SAMPLE_RATE.toFloat() * (bufferSize.toFloat() / AUDIO_BUFFER_SIZE.toFloat())).roundToInt()
-                    }
+        var source: TarsosDSPAudioInputStream? = null
+        try {
+            val newSource = sourceFactory(TunerPipeline.SAMPLE_RATE, TunerPipeline.BUFFER_SIZE)
+            source = newSource
+            val newDispatcher = dispatcherFactory(newSource) { result, inputRms ->
+                processPitch(result, inputRms)
             }
+
+            this.dispatcher = newDispatcher
+            this.dispatcherThread = Thread(newDispatcher, "audio-dispatcher").apply {
+                isDaemon = true
+                start()
+            }
+        } catch (e: Exception) {
+            running = false
+            // This is the only point where the microphone can be lost: the stream starts capturing
+            // as soon as it is created, so it has to be released by whoever owns it at the moment of
+            // the failure. Once the dispatcher is assigned it owns the stream, and stopping it closes
+            // the stream; before that the stream is the only owner and nothing else can close it.
+            // The two paths are exclusive, since closing the stream twice would release the
+            // AudioRecord twice.
+            if (dispatcher == null) {
+                runCatching { source?.close() }
+            }
+            releaseDispatcher()
+
+            val err = if (e is TunerException) e else TunerException(e.message, e)
+            _error.update { err }
+            throw err
         }
     }
 
@@ -344,10 +458,24 @@ class Tuner(
     fun stop() {
         if (running) {
             running = false
-
-            // Stop the audio dispatcher.
-            dispatcher!!.stop()
-            dispatcher = null
+            releaseDispatcher()
+            tracker.reset()
         }
+    }
+
+    /**
+     * Stops the dispatcher and forgets it, waiting for its thread to finish.
+     *
+     * Stopping the dispatcher is what closes the audio stream, which stops and releases the
+     * microphone: it is the only owner of the stream while it exists. Both fields are `null` when
+     * the tuner never started, which makes the call a no-op.
+     *
+     * The call never throws, so it is safe from the catch block that is already handling a failure.
+     */
+    private fun releaseDispatcher() {
+        runCatching { dispatcher?.stop() }
+        dispatcherThread?.let { runCatching { it.join(STOP_JOIN_TIMEOUT_MS) } }
+        dispatcher = null
+        dispatcherThread = null
     }
 }
