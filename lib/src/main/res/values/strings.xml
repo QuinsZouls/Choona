@@ -115,4 +115,15 @@
     <string name="delete_tuning_confirmation">Delete this tuning?</string>
     <string name="new_tuning">New Tuning</string>
     <string name="dist_desc">%1$s Build</string>
+    <string name="tap_tempo">Tap Tempo</string>
+    <string name="tap_tempo_start">Tap along to the beat</string>
+    <string name="tap_tempo_bpm">BPM</string>
+    <plurals name="tap_tempo_taps">
+        <item quantity="one">%1$d tap</item>
+        <item quantity="other">%1$d taps</item>
+    </plurals>
+    <string name="tap_tempo_steady">Steady</string>
+    <string name="tap_tempo_reset">Reset</string>
+    <string name="tap_tempo_double">Double tempo</string>
+    <string name="tap_tempo_halve">Halve tempo</string>
 </resources>

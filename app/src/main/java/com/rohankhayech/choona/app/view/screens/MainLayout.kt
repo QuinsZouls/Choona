@@ -55,6 +55,7 @@ import com.rohankhayech.choona.lib.model.tuning.Instrument
 import com.rohankhayech.choona.lib.model.tuning.Tuning
 import com.rohankhayech.choona.lib.model.tuning.TuningEntry
 import com.rohankhayech.choona.lib.view.viewmodel.EditTuningViewModel
+import com.rohankhayech.choona.lib.view.viewmodel.TapTempoViewModel
 import com.rohankhayech.choona.lib.view.viewmodel.TunerViewModel.Screen
 
 /**
@@ -94,6 +95,7 @@ import com.rohankhayech.choona.lib.view.viewmodel.TunerViewModel.Screen
  * @param onTuned Called when the detected note is held in tune.
  * @param onOpenTuningSelector Called when the user opens the tuning selector screen.
  * @param onSettingsPressed Called when the settings button is pressed.
+ * @param onTapTempoPressed Called when the tap tempo button is pressed.
  * @param onConfigurePressed Called when the configure tuning button is pressed.
  * @param onSelectTuningFromList Called when a tuning is selected from the selection panel.
  * @param onSelectChromaticFromList Called when the chromatic mode is selected from the selection panel.
@@ -143,6 +145,7 @@ fun MainLayout(
     onTuned: () -> Unit,
     onOpenTuningSelector: () -> Unit,
     onSettingsPressed: () -> Unit,
+    onTapTempoPressed: () -> Unit,
     onConfigurePressed: () -> Unit,
     onSelectTuningFromList: (Tuning) -> Unit,
     onSelectChromaticFromList: () -> Unit,
@@ -205,6 +208,7 @@ fun MainLayout(
                     onTuned,
                     onOpenTuningSelector,
                     onSettingsPressed,
+                    onTapTempoPressed,
                     onConfigurePressed,
                     editModeEnabled,
                     onEditModeChanged,
@@ -260,6 +264,28 @@ fun MainLayout(
                         onDismiss = onBack
                     )
                 }
+            }
+
+            entry<Screen.TapTempo>(
+                metadata = NavDisplay.transitionSpec {
+                    slideIntoContainer(SlideDirection.Up) togetherWith fadeOut()
+                } + NavDisplay.popTransitionSpec {
+                    fadeIn() togetherWith slideOutOfContainer(SlideDirection.Down)
+                } + NavDisplay.predictivePopTransitionSpec {
+                    fadeIn() togetherWith slideOutOfContainer(SlideDirection.Down)
+                }
+            ) {
+                val tapTempoVM: TapTempoViewModel = viewModel()
+                val tapTempoState by tapTempoVM.state.collectAsStateWithLifecycle()
+
+                TapTempoScreen(
+                    state = tapTempoState,
+                    onTap = tapTempoVM::tap,
+                    onReset = tapTempoVM::reset,
+                    onDoubleTempo = tapTempoVM::doubleTempo,
+                    onHalveTempo = tapTempoVM::halveTempo,
+                    onDismiss = onBack,
+                )
             }
 
             entry<Screen.EditTuning> (

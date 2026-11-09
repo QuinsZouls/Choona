@@ -72,6 +72,20 @@ class TunerViewModelTest {
     }
 
     @Test
+    fun testOpenTapTempo() {
+        vm.openTapTempo()
+        assertTrue(vm.backStack.size == 2)
+        assertTrue(vm.backStack.last() == Screen.TapTempo)
+
+        vm.openTapTempo()
+        assertTrue(vm.backStack.size == 2)
+
+        vm.navBack()
+        assertTrue(vm.backStack.size == 1)
+        assertTrue(vm.backStack.last() == Screen.Tuner)
+    }
+
+    @Test
     fun testNavBack() {
         vm.openTuningSelector()
         vm.navBack()

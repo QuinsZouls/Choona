@@ -109,6 +109,13 @@ class TunerViewModel : ViewModel() {
         }
     }
 
+    /** Opens the tap tempo screen. */
+    fun openTapTempo() {
+        if (!_backStack.contains(Screen.TapTempo)) {
+            _backStack.add(Screen.TapTempo)
+        }
+    }
+
     /**
      * Navigates back to the previous screen in the back-stack,
      * if one exists.
@@ -211,6 +218,7 @@ class TunerViewModel : ViewModel() {
         @Serializable object Tuner: Screen()
         @Serializable object ConfigureTuning: Screen()
         @Serializable object TuningSelection: Screen()
+        @Serializable object TapTempo: Screen()
         @Serializable data class EditTuning(val tuningJSON: String, val new: Boolean): Screen()
     }
 }

@@ -174,6 +174,7 @@ class TunerActivity : BaseTunerActivity() {
                     onTuned = ::setTuned,
                     onOpenTuningSelector = ::openTuningSelector,
                     onSettingsPressed = ::openSettings,
+                    onTapTempoPressed = ::openTapTempo,
                     onConfigurePressed = ::openConfigurePanel,
                     onSelectTuningFromList = ::selectTuningFromList,
                     onSelectChromaticFromList = ::selectChromaticFromList,
