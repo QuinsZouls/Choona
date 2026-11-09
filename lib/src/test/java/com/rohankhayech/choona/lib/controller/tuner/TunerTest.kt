@@ -25,6 +25,7 @@ import com.rohankhayech.choona.lib.model.tuning.Tuning
 import com.rohankhayech.choona.lib.model.tuning.Tunings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
@@ -39,7 +40,9 @@ class TunerTest {
 
     @Before
     fun setUp() {
-        tuner = Tuner()
+        // The real pipeline applies multi-frame median/octave folding (PitchTracker).
+        // This suite pins the pure, frame-by-frame offset calculation.
+        tuner = Tuner(Tuning.STANDARD, PitchTracker.passthrough())
     }
 
     @Test
@@ -250,5 +253,298 @@ class TunerTest {
         tuner.processPitch(PitchDetectionResult().apply { pitch = -1f; isPitched = false })
         assertEquals(Notes.getIndex("A4"), tuner.selectedNote.value) // Test no change.
         assertNull(tuner.noteOffset.value) // Test not offset.
+    }
+
+    // Behaviour of the real pipeline: the gates, the octave folding and the median of PitchTracker,
+    // which [Tuner.start] wires between the detector and the rest of the tuner.
+
+    @Test
+    fun testProcessPitchRmsGate() {
+        val tuner = newPipelineTuner()
+        val frame = frame(pitch = A4_HZ)
+
+        tuner.processPitch(frame, 1e-4f)
+        assertNull(
+            "A frame below MIN_RMS (${PitchTracker.MIN_RMS}) must not move the needle",
+            tuner.noteOffset.value,
+        )
+
+        tuner.processPitch(frame, 0.1f)
+        assertEquals(
+            "The same frame above the level gate must be reported",
+            5.0,
+            tuner.noteOffset.value!!,
+            0.001,
+        )
+        assertEquals(
+            "Auto detect must select the E4 string, the closest one to an A4",
+            stringIndexOf("E4"),
+            tuner.selectedString.value,
+        )
+    }
+
+    @Test
+    fun testProcessPitchDoesNotFilterOnTheConfidenceOfTheFrame() {
+        val tuner = newPipelineTuner()
+
+        // The confidence is filtered by the detector itself: FastYin only flags a frame as pitched
+        // when its clarity stays above 1 - YIN_THRESHOLD (0.85), so a frame that reaches the tuner
+        // has already passed the only confidence filter of the chain. Repeating it here would throw
+        // away the weak frames the detector accepted, which is the note the tuner is played to see.
+        tuner.processPitch(frame(pitch = A4_HZ, probability = 0.4f), 0.1f)
+        assertEquals(
+            "A detected frame must move the needle whatever clarity the detector reported with it",
+            5.0,
+            tuner.noteOffset.value!!,
+            0.001,
+        )
+    }
+
+    @Test
+    fun testProcessPitchOctaveFold() {
+        val tuner = newPipelineTuner()
+        // The second harmonic of the low E2 string is an E3, which is no string of the tuning: the
+        // detector reports a note an octave high and only the folding of the tracker undoes it.
+        // The folding needs FOLD_CONFIRM_FRAMES (2) consecutive frames, so the first one is still
+        // reported as the note it was detected as and the needle only settles on the second.
+        val secondHarmonicOfE2 = frame(pitch = E3_HZ, probability = 0.99f)
+
+        tuner.processPitch(secondHarmonicOfE2, 0.1f)
+        assertNotEquals(
+            "One frame is not enough to confirm the folding",
+            stringIndexOf("E2"),
+            tuner.selectedString.value,
+        )
+
+        tuner.processPitch(secondHarmonicOfE2, 0.1f)
+        assertEquals(
+            "The folded note must be in tune with the low E",
+            0.0,
+            tuner.noteOffset.value!!,
+            0.05,
+        )
+        assertEquals(
+            "The folded note must be attributed to the E2 string",
+            stringIndexOf("E2"),
+            tuner.selectedString.value,
+        )
+    }
+
+    @Test
+    fun testE5AboveTheRangeFoldsAfterTheConfirmFrames() {
+        val tuner = Tuner(Tuning.STANDARD)
+        // The second harmonic of the highest E string reads as +7 semitones from A4, which is above
+        // the ceiling of the range (B4, +2). Its octave below is the E4 string, an octave down and
+        // inside the range, so the note is worth folding rather than dropping, but the folding needs
+        // FOLD_CONFIRM_FRAMES (2) frames: roughly 46 ms each on the window of the pipeline. The
+        // first frame is therefore held, not published and not discarded, so that the counter that
+        // confirms the folding survives to the second one.
+        val e5 = frame(pitch = E5_HZ)
+
+        tuner.processPitch(e5, 0.1f)
+        assertNull(
+            "An E5 must show nothing while its octave error is being confirmed, but the needle " +
+                "moved to ${tuner.noteOffset.value}",
+            tuner.noteOffset.value,
+        )
+        assertEquals(
+            "A held frame must not change the selected string either",
+            0,
+            tuner.selectedString.value,
+        )
+
+        tuner.processPitch(e5, 0.1f)
+        assertEquals(
+            "The second frame confirms the folding and the E5 must be attributed to the E4 string " +
+                "it belongs to, instead of the wrong string at the end of the needle",
+            stringIndexOf("E4"),
+            tuner.selectedString.value,
+        )
+        assertEquals(
+            "The folded E5 must read in tune with the E4 string",
+            0.0,
+            checkNotNull(tuner.noteOffset.value),
+            0.05,
+        )
+    }
+
+    @Test
+    fun testB5AboveTheRangeIsNeverShown() {
+        val tuner = Tuner(Tuning.STANDARD)
+        val initialString = tuner.selectedString.value
+        // A B5 is twelve semitones above the ceiling of the range, and it does not fold: the note an
+        // octave below is a B4, which is no string of the standard tuning, so the folded value sits
+        // seven semitones away from the closest string (the E4). No number of frames brings it into
+        // the range, and it must never move the needle.
+        repeat(PitchTracker.FOLD_CONFIRM_FRAMES + 3) { index ->
+            tuner.processPitch(frame(pitch = B5_HZ), 0.1f)
+            assertNull(
+                "A B5 must never be shown, but frame $index moved the needle to " +
+                    "${tuner.noteOffset.value}",
+                tuner.noteOffset.value,
+            )
+            assertEquals(
+                "A B5 must not change the selected string",
+                initialString,
+                tuner.selectedString.value,
+            )
+        }
+    }
+
+    @Test
+    fun testB6AboveTheRangeIsNeverShown() {
+        val instrument = Tuner(Tuning.STANDARD)
+        repeat(PitchTracker.FOLD_CONFIRM_FRAMES + 1) {
+            instrument.processPitch(frame(pitch = B6_HZ), 0.1f)
+        }
+        assertNull(
+            "A B6 is far above the range and must not move the needle, but it read " +
+                "${instrument.noteOffset.value}",
+            instrument.noteOffset.value,
+        )
+
+        val chromatic = chromaticTuner()
+        chromatic.selectNote(Tuner.HIGHEST_NOTE)
+        chromatic.setAutoDetect(true)
+        chromatic.processPitch(frame(pitch = B6_HZ), 0.1f)
+        assertNull(
+            "A B6 must not move the needle in chromatic mode either",
+            chromatic.noteOffset.value,
+        )
+        assertEquals(
+            "An out of range note must not move the selected note",
+            Tuner.HIGHEST_NOTE,
+            chromatic.selectedNote.value,
+        )
+    }
+
+    @Test
+    fun testB4AtTheEdgeOfTheRangeIsAccepted() {
+        // The margin of RANGE_TOLERANCE (1 semitone) exists for the two ends of the instrument: a
+        // B4 that sits high has to be tracked, or the highest string could never be brought down.
+        // Chromatic mode is used to isolate the range gate: in instrument mode a B4 is folded onto
+        // the B3 string after the frames the folding takes, which is a question of the folding and
+        // not of the range.
+        val instrument = Tuner(Tuning.STANDARD)
+        instrument.processPitch(frame(pitch = B4_HZ), 0.1f)
+        assertEquals(
+            "A B4 is the highest note the tuner represents and must be tracked, with the needle " +
+                "at the end of its travel from the E4 string it is closest to",
+            7.0,
+            checkNotNull(instrument.noteOffset.value),
+            0.01,
+        )
+
+        val inTune = chromaticTuner()
+        inTune.processPitch(frame(pitch = B4_HZ), 0.1f)
+        assertEquals(
+            "A B4 must read in tune with itself in chromatic mode",
+            0.0,
+            checkNotNull(inTune.noteOffset.value),
+            0.01,
+        )
+
+        val sharp = chromaticTuner()
+        sharp.processPitch(frame(pitch = B4_SHARP_CENTS_HZ), 0.1f)
+        assertEquals(
+            "A B4 five cents sharp is outside the range by a fraction of a semitone and must " +
+                "still be tracked",
+            0.05,
+            checkNotNull(sharp.noteOffset.value),
+            0.01,
+        )
+    }
+
+    @Test
+    fun testProcessPitchUnpitchedResetsTracker() {
+        val tuner = newPipelineTuner()
+        tuner.selectString(stringIndexOf("E4"))
+
+        tuner.processPitch(frame(pitch = A4_HZ), 0.1f)
+        assertEquals(5.0, tuner.noteOffset.value!!, 0.001)
+
+        tuner.processPitch(unpitchedFrame(), 0.1f)
+        assertNull("An unpitched frame must clear the needle", tuner.noteOffset.value)
+
+        tuner.processPitch(frame(pitch = B3_HZ), 0.1f)
+        assertEquals(
+            "The frame after a silence must be reported on its own, not averaged with the old note",
+            -5.0,
+            tuner.noteOffset.value!!,
+            0.001,
+        )
+
+        // A move of a single semitone is small enough to keep the median window of the previous
+        // note, so the silence in between is what proves that the window was dropped.
+        repeat(3) { tuner.processPitch(frame(pitch = A4_HZ), 0.1f) }
+        tuner.processPitch(unpitchedFrame(), 0.1f)
+        tuner.processPitch(frame(pitch = A_SHARP4_HZ), 0.1f)
+        assertEquals(
+            "The first frame of the new note must not be mixed with the window of the old one",
+            6.0,
+            tuner.noteOffset.value!!,
+            0.001,
+        )
+    }
+
+    /**
+     * Creates a tuner whose tracker applies the level gate, the folding and the median of the
+     * pipeline, with the range left open on both sides, which is what lets the other tests feed
+     * notes the application would reject.
+     */
+    private fun newPipelineTuner() = Tuner(Tuning.STANDARD, PitchTracker())
+
+    /** Creates a tuner in chromatic mode, where the tracker does not fold the octave error. */
+    private fun chromaticTuner() = Tuner(Tuning.STANDARD).apply { setChromatic() }
+
+    /** Builds a detection frame of the given [pitch], with an unknown clarity unless stated. */
+    private fun frame(
+        pitch: Float,
+        probability: Float = -1f,
+        isPitched: Boolean = true,
+    ): PitchDetectionResult = PitchDetectionResult().apply {
+        this.pitch = pitch
+        this.probability = probability
+        this.isPitched = isPitched
+    }
+
+    /** Builds the frame of a detector that reports no pitch at all. */
+    private fun unpitchedFrame() = frame(pitch = -1f, probability = 0f, isPitched = false)
+
+    /** Index of the string of [Tuning.STANDARD] whose root note is the given [note]. */
+    private fun stringIndexOf(note: String): Int {
+        val noteIndex = Notes.getIndex(note)
+        return (0 until Tuning.STANDARD.numStrings()).first {
+            Tuning.STANDARD.getString(it).getNoteIndex(0) == noteIndex
+        }
+    }
+
+    private companion object {
+        /** An A4, one octave above the highest string of the standard tuning. */
+        const val A4_HZ = 440f
+
+        /** A B3, the root of the second string of the standard tuning. */
+        const val B3_HZ = 246.94f
+
+        /** An A#4, a semitone above an A4. */
+        const val A_SHARP4_HZ = 466.16f
+
+        /** An E3, the second harmonic of the low E string. */
+        const val E3_HZ = 164.8138f
+
+        /** An E5, the second harmonic of the highest string of the standard tuning. */
+        const val E5_HZ = 659.2551f
+
+        /** A B4, the highest note of the range. */
+        const val B4_HZ = 493.8833f
+
+        /** A B4 five cents sharp, outside the range by a fraction of a semitone. */
+        const val B4_SHARP_CENTS_HZ = 495.3f
+
+        /** A B5, twelve semitones above [Tuner.HIGHEST_NOTE]. */
+        const val B5_HZ = 987.7666f
+
+        /** A B6, well above [Tuner.HIGHEST_NOTE]. */
+        const val B6_HZ = 1975.5333f
     }
 }

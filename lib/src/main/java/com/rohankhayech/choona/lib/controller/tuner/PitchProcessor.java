@@ -52,6 +52,17 @@ import be.tarsos.dsp.pitch.PitchDetector;
  * Modified copy of PitchProcessor from TarsosDSP allowing a pitch detector object to be passed in.
  * Is responsible to call a pitch estimation algorithm. It also calculates progress.
  * The underlying pitch detection algorithm must implement the {@link PitchDetector} interface.
+ *
+ * <p>The samples to analyse can either be taken from the {@link AudioEvent} of the current frame,
+ * which is the default, or from a {@link FloatBufferSource} passed in on construction. The second
+ * form lets the detector analyse the signal as it has already been conditioned by the previous
+ * processor of the {@link be.tarsos.dsp.AudioDispatcher} chain, without the outcome depending on
+ * the buffers TarsosDSP hands to the frame.
+ *
+ * <p>The array returned by the source is read only: it is the same array that the audio thread
+ * reuses for every frame, so the detector must not modify it. A detector that needs to alter the
+ * samples has to work on its own copy.
+ *
  * @author Joren Six
  */
 class PitchProcessor implements AudioProcessor {
@@ -63,14 +74,34 @@ class PitchProcessor implements AudioProcessor {
 
     private final PitchDetectionHandler handler;
 
+    /**
+     * Source of the samples to analyse, or {@code null} to analyse the buffer of the audio event.
+     */
+    private final FloatBufferSource bufferSource;
+
     public PitchProcessor(PitchDetector detector, PitchDetectionHandler handler) {
+        this(detector, handler, null);
+    }
+
+    /**
+     * Creates a pitch processor that analyses the samples served by the given source.
+     *
+     * @param detector The pitch detector to run on the samples.
+     * @param handler The handler to report the detected pitch to.
+     * @param bufferSource Source of the conditioned samples to analyse, or {@code null} to analyse
+     *                     the buffer of the audio event. The array it returns is read only and is
+     *                     reused between frames.
+     */
+    public PitchProcessor(PitchDetector detector, PitchDetectionHandler handler, FloatBufferSource bufferSource) {
         this.detector = detector;
         this.handler = handler;
+        this.bufferSource = bufferSource;
     }
 
     @Override
     public boolean process(AudioEvent audioEvent) {
-        float[] audioFloatBuffer = audioEvent.getFloatBuffer();
+        final float[] audioFloatBuffer =
+            bufferSource == null ? audioEvent.getFloatBuffer() : bufferSource.getBuffer();
 
         PitchDetectionResult result = detector.getPitch(audioFloatBuffer);
 
