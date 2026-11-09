@@ -251,6 +251,14 @@ abstract class BaseTunerActivity : ComponentActivity() {
     }
 
     /**
+     * Opens the tap tempo screen, and stops the tuner.
+     */
+    protected fun openTapTempo() {
+        vm.openTapTempo()
+        checkAndStopTuner()
+    }
+
+    /**
      * Opens the tuning selection screen, and stops the tuner.
      */
     protected fun openTuningSelector() {

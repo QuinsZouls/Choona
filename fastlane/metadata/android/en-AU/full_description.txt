@@ -11,6 +11,7 @@ Guitar tuner with support for custom tunings.
 - Display tuning offset in semitones or cents for improved accuracy.
 - Plays sounds to indicate how a string should sound and when it is in tune.
 - Keep track of your favourite tunings.
+- Find the tempo of a song by tapping along to the beat.
 - Set a tuning to open automatically when the app starts, or keep the last used tuning.
 - Support for dark mode, true dark and device colour themes.
 - Support for multi-window and large screen devices.
