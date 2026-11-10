@@ -126,4 +126,19 @@
     <string name="tap_tempo_reset">Reset</string>
     <string name="tap_tempo_double">Double tempo</string>
     <string name="tap_tempo_halve">Halve tempo</string>
+    <string name="metronome">Metronome</string>
+    <string name="metronome_play">Play</string>
+    <string name="metronome_stop">Stop</string>
+    <string name="metronome_bpm">BPM</string>
+    <string name="metronome_tap">Tap tempo</string>
+    <string name="metronome_beats_per_bar">Beats per bar</string>
+    <string name="metronome_accent_first_beat">Accent first beat</string>
+    <string name="metronome_increase_bpm">Increase tempo</string>
+    <string name="metronome_decrease_bpm">Decrease tempo</string>
+    <string name="metronome_increase_beats">Add a beat</string>
+    <string name="metronome_decrease_beats">Remove a beat</string>
+    <string name="metronome_state_playing">Playing, %1$d BPM, %2$d-beat bar</string>
+    <string name="metronome_state_stopped">Stopped, %1$d BPM, %2$d-beat bar</string>
+    <string name="metronome_bpm_state">%1$d BPM</string>
+    <string name="metronome_error_generic">Audio output is unavailable.</string>
 </resources>

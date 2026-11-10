@@ -259,6 +259,14 @@ abstract class BaseTunerActivity : ComponentActivity() {
     }
 
     /**
+     * Opens the metronome screen, and stops the tuner.
+     */
+    protected fun openMetronome() {
+        vm.openMetronome()
+        checkAndStopTuner()
+    }
+
+    /**
      * Opens the tuning selection screen, and stops the tuner.
      */
     protected fun openTuningSelector() {

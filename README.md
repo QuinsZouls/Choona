@@ -14,6 +14,7 @@ Guitar tuner application for Android and Wear OS with support for custom tunings
 - Plays sounds to indicate how a string should sound and when it is in tune.
 - Keep track of your favourite tunings.
 - Find the tempo of a song by tapping along to the beat.
+- Keep time with a built-in metronome, from 30 to 300 BPM.
 - Set a tuning to open automatically when the app starts, or keep the last used tuning.
 - Support for dark mode, true dark and device colour themes.
 - Support for multi-window and large screen devices.

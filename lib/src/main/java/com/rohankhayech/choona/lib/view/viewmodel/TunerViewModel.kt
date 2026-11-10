@@ -116,6 +116,13 @@ class TunerViewModel : ViewModel() {
         }
     }
 
+    /** Opens the metronome screen. */
+    fun openMetronome() {
+        if (!_backStack.contains(Screen.Metronome)) {
+            _backStack.add(Screen.Metronome)
+        }
+    }
+
     /**
      * Navigates back to the previous screen in the back-stack,
      * if one exists.
@@ -219,6 +226,7 @@ class TunerViewModel : ViewModel() {
         @Serializable object ConfigureTuning: Screen()
         @Serializable object TuningSelection: Screen()
         @Serializable object TapTempo: Screen()
+        @Serializable object Metronome: Screen()
         @Serializable data class EditTuning(val tuningJSON: String, val new: Boolean): Screen()
     }
 }
