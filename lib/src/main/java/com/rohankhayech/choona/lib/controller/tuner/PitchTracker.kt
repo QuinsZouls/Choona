@@ -25,13 +25,12 @@ import com.rohankhayech.choona.lib.model.tuning.Notes
  * Turns the raw result of the pitch detector into a stable offset from A4 in semitones, or `null`
  * when the frame carries no reliable note.
  *
- * The detector answers frame by frame, and its answer is noisy: it invents notes on silence, it
- * reports the octave above the string that is actually being played and its offset jumps by a whole
- * semitone when the tuning peg moves by a fraction of a cent. This class sits between the detector
- * and the rest of the tuner and applies the decisions that turn that stream into something a needle
- * can follow: a gate on the level of the frame, the rejection of the notes outside the detectable
- * range, the folding of the octave error, a median over a short window, and a reset whenever the
- * played note changes.
+ * The detector answers frame by frame, and its answer is noisy: it reports the octave above the
+ * string that is actually being played and its offset jumps by a whole semitone when the tuning peg
+ * moves by a fraction of a cent. This class sits between the detector and the rest of the tuner and
+ * applies the decisions that turn that stream into something a needle can follow: a gate on the
+ * level of the frame, the rejection of the notes outside the detectable range, the folding of the
+ * octave error, a median over a short window, and a reset whenever the played note changes.
  *
  * The class is deliberately pure Kotlin, with no Android and no Tarsos dependency, so that it can
  * be exercised on the host JVM. It only reads [Notes] and uses `kotlin.math`.
@@ -52,9 +51,30 @@ import com.rohankhayech.choona.lib.model.tuning.Notes
  * ### Gate
  * Frames that cannot hold a note are discarded before any filtering, and discard resets the whole
  * state: a silence must not leave the window of the previous note behind. The gate closes on a pitch
- * that is not finite or not positive, on a level below the threshold and on a folded offset outside
- * the detectable range, but a frame that does not know its own level is let through, because a
- * detector that does not report it is the caller's choice, not a defect of the frame.
+ * that is not finite or not positive, on a level under [MIN_RMS] and on an offset outside the
+ * detectable range, but a frame that does not know its own level is let through, because a detector
+ * that does not report it is the caller's choice, not a defect of the frame.
+ *
+ * The level gate is the absolute floor of [MIN_RMS] and it is deliberately **not** adapted to the
+ * room the tuner is listening to. The three measurements that rule an adaptive floor out:
+ *
+ * - **It has nothing to filter.** White noise carries no period, so the detector reports no pitch on
+ *   it: measured on this chain, **0 of 29** frames hold a note on the noise of a room at -60 dBFS
+ *   and **0 of 29** on the noise of a room at -40 dBFS, a room 20 dB louder. A floor
+ *   above the noise only repeats a filter the detector has already applied.
+ *   `PipelineIntegrationTest.testSilenceProducesNoPitch` pins the three levels.
+ * - **A room that is not noise is a note.** A fan, a television or the harmonic of the mains carries
+ *   a period, so the detector does not fail on it and reports it: measured, **29 of 29** frames of a
+ *   tonal room are pitched, and no threshold on the level can tell such a frame apart from a string
+ *   that is being played.
+ *   `PipelineIntegrationTest.testTonalRoomIsReportedAsANote` pins it.
+ * - **A floor learnt from the frames without a note ends up over the note.** The detector drops
+ *   frames of a note that is being played, and those frames carry the level of the note, not the
+ *   level of the room: on a weak E2 with half of its frames dropped, a floor that learns from them
+ *   converges onto the level of the note itself, the gate sits 6 dB above it and the note stops being
+ *   published for good after **69 frames** (~3.2 s), with no way back while the string is held.
+ *   `PipelineIntegrationTest.testWeakNoteIsPublishedWhileTheDetectorDropsEveryOtherFrame` pins that
+ *   failure as the note that must survive it.
  *
  * The confidence of a frame is **not** gated here, and must not be: the detector has already applied
  * that filter. `FastYin` only sets `isPitched` when the normalised difference of the best lag stays
@@ -62,14 +82,9 @@ import com.rohankhayech.choona.lib.model.tuning.Notes
  * it with, and publishes its clarity as `1 - difference`: a frame that reaches this class therefore
  * always carries a clarity above `1 - 0.15 = 0.85`, and a frame below it is never reported as a
  * pitch at all. A second gate above that floor only throws away frames the detector accepted, and
- * one at or below it can never fire.
- *
- * The measurement that settles it, on the signal this class exists to save — the low E at 10 dB SNR,
- * the weak string of the low-signal case. In this chain the detector reports **29 of 29** frames
- * with [TunerPipeline.YIN_THRESHOLD] at 0.15. With the threshold at 0.20 it still reports them all,
- * but their clarity drops from `0.85..0.96` to `0.80..0.89`, under the 0.90 of the gate this class
- * used to carry, which then keeps **0 of 29**: the gate never filtered bad frames, it filtered the
- * note, and the threshold it opened was what pushed the note under it.
+ * one at or below it can never fire. Measured on the low E at 10 dB SNR with the threshold at 0.20,
+ * the detector still reports its 29 frames but their clarity drops under the 0.90 of the gate this
+ * class used to carry, which then keeps **0 of 29**.
  * `PipelineIntegrationTest.testWeakFundamentalAtTenDbSnrIsDetected` pins both arms of that
  * measurement.
  *
@@ -79,36 +94,60 @@ import com.rohankhayech.choona.lib.model.tuning.Notes
  * it reports a note an octave high, which is exactly the pitch of another string of the tuning.
  * A frame is therefore considered to belong to the octave below when it is farther than
  * [foldTolerance] from every string but within [foldTolerance] of a string an octave down, and the
- * folding is applied from that frame on.
+ * folding is applied to that frame.
+ *
+ * **A frame that asks for the folding is published already folded**: it is not held and its raw
+ * offset is never published. The raw offset belongs to the note an octave above the string that is
+ * being played, which is often a string of the tuning itself: measured, a B3 whose odd harmonics sit
+ * 12 dB under its even ones is reported by the detector as the 494 to 495.6 Hz of the B4 on all 29
+ * frames, and the raw offset of those frames, +2.05 semitones from A4, is 7.05 semitones away from
+ * the E4 string —the closest string of standard tuning— while the folded one lands on the B3 the
+ * string is tuned to. `PipelineIntegrationTest.testOctaveErrorOfB3IsNeverPublishedAsAnotherString`
+ * pins that failure and `PipelineIntegrationTest.testForcedOctaveErrorNeverSelectsAnotherString`
+ * sweeps every string of the tuning with an octave error forced on it.
+ *
+ * What keeps the needle still when the detector flickers between the string and its octave is that
+ * the folded value is published on the frame that asks for it: measured on twenty frames of a B3
+ * whose detector alternates between the note and its double, the tuner reports **one** value on all
+ * twenty. The raw offset, published as it came, moved the needle twelve semitones every other frame
+ * and with it the string the tuner selects.
+ *
+ * The confirmation of [foldConfirmFrames] frames and the release of [foldReleaseFrames] frames are
+ * therefore a hysteresis that governs only the frames that do **not** ask for the folding: they
+ * decide whether the folding is still held there, and cost [foldReleaseFrames] frames to let it go.
+ * The withholding this replaces did not hold the note: measured on a B3 with an octave error in which
+ * the detector drops every other frame, the raw offset was published on all fifteen frames of the
+ * note, as the E4 string 7.05 semitones away —the wrong string, which is the defect this rule
+ * removes— and held frames would have published none of them, as they did for a note above the
+ * ceiling of the range, which arrived ≈46 ms late instead.
  *
  * Only **one** octave is ever folded: A4/2 = A3 is not a string, but A4/4 = A2 is one in standard
  * tuning, so folding by four would turn a correctly detected A4 into an "in tune" A2.
  * `offset(f/2)` is exactly `offset(f) - 12`, since a factor of two is one octave.
+ *
+ * **Known limitation:** the folding reads the octave and not the string, so a string far enough from
+ * its note for its octave below to be a string of the tuning is published as that string. Measured on
+ * standard tuning, a G3 three semitones flat reads as the E2 and a B3 three semitones sharp as the
+ * D3. It is the price of the octave rule, which no frame can tell apart from the error it repairs.
  *
  * ### Range
  * The detector has no frequency range of its own: the lag it searches reaches 2047 samples, which
  * is 21 Hz at 44.1 kHz, so it can report anything from a rumble to a harmonic far above the string
  * that was plucked. The gate of [lowestNote] and [highestNote] discards the frames whose offset
  * falls outside the range the tuner can represent, which is what stops a B5 or a B6 from being
- * reported as a note tens of semitones away from the string being played.
+ * reported as a note tens of semitones away from the string being played. It keeps discarding on its
+ * own: the folding does not replace it.
  *
- * The gate reads the **folded** offset, so an E5 is still accepted, as the E4 string it belongs to,
- * and it allows [RANGE_TOLERANCE] of a semitone on each side of the range. That margin is what lets
- * the user tune the two ends of the instrument: a D1 that enters the range from below, and a B4 that
- * sits high, since without it a B4 five cents sharp would be outside the range and the highest
- * string of the tuning could never be brought down. The other side of that coin is the limitation
- * the margin buys: a string more than [RANGE_TOLERANCE] of a semitone away from the end of the range
- * —a D1 a whole semitone flat, a B4 more than a semitone sharp— is not reported until it enters the
- * band, so the user has to trust the display for the first semitone of the correction.
- *
- * The fold and the gate disagree on the first frames of a note above the ceiling of the range. An E5
- * reads as an offset of +7, twelve semitones above the E4 string it belongs to and therefore out of
- * range, until [foldConfirmFrames] frames have confirmed that it belongs to the octave below, where
- * it is already inside. Discarding those frames would reset the counters that are about to bring the
- * note into the range, so the fold would never be confirmed and the note would never be shown: a
- * frame that is out of range while the fold is being confirmed is **held** instead —nothing is
- * published and no state is dropped— and the note appears [foldConfirmFrames] frames later, roughly
- * 46 ms per frame on the window of the pipeline.
+ * The gate reads the **folded** offset, which is what lets a note above the ceiling be published on
+ * the frame that asks for the folding: the raw offset of an E5 is +7 semitones from A4, twelve
+ * semitones above the E4 string it belongs to and out of range, while the folded one is the string
+ * itself. It allows [RANGE_TOLERANCE] of a semitone on each side of the range, and that margin is
+ * what lets the user tune the two ends of the instrument: a D1 that enters the range from below, and
+ * a B4 that sits high, since without it a B4 five cents sharp would be outside the range and the
+ * highest string of the tuning could never be brought down. The other side of that coin is the
+ * limitation the margin buys: a string more than [RANGE_TOLERANCE] of a semitone away from the end
+ * of the range —a D1 a whole semitone flat, a B4 more than a semitone sharp— is not reported until
+ * it enters the band, so the user has to trust the display for the first semitone of the correction.
  *
  * A note far above the ceiling, such as a B5 or a B6, is rejected for good: the fold is only wanted
  * when the note an octave below is within [foldTolerance] of a string, and the octave below those is
@@ -122,8 +161,8 @@ import com.rohankhayech.choona.lib.model.tuning.Notes
  * ### Note changes
  * A change of more than [resetJumpThreshold] semitones between two consecutive frames is treated as
  * a change of note, not as a drift, and clears the window: without it the median would answer with
- * the average of two different strings for a few frames. The same happens when the octave folding
- * changes state, since the offsets on both sides of that change live an octave apart.
+ * the average of two different strings for a few frames. A change of octave folding state is covered
+ * by the same reset, since the offsets on both sides of it live twelve semitones apart.
  *
  * The instance is stateful and not thread safe: [process] is meant to be called from the single
  * thread that delivers the audio frames, with [reset] called from the same thread when the tuner is
@@ -131,13 +170,14 @@ import com.rohankhayech.choona.lib.model.tuning.Notes
  *
  * @param medianWindow Number of frames the reported offset is the median of. A value below 1 is
  * treated as 1, which emits every frame as it is.
- * @param minRms Level below which a frame is discarded. A negative value disables the check, since
- * no measurable level falls below it: pass `-1f`, never [Float.NaN], because a `NaN` threshold
- * would compare false against every level and quietly disable the gate as well.
+ * @param minRms Absolute floor of the level gate: a frame below it is discarded. A negative value
+ * disables the floor, since no measurable level falls below it: pass `-1f`, never [Float.NaN],
+ * because a `NaN` threshold would compare false against every level and quietly disable the gate as
+ * well.
  * @param foldTolerance Distance in semitones within which a frame is considered to belong to a
  * string, both in its own octave and in the octave below.
- * @param foldConfirmFrames Number of consecutive frames that must ask for the folding before it is
- * applied. A value below 1 is treated as 1.
+ * @param foldConfirmFrames Number of consecutive frames that must ask for the folding before it holds
+ * on the frames that reject it. A value below 1 is treated as 1.
  * @param foldReleaseFrames Number of consecutive frames that must reject the folding before it is
  * dropped. A value below 1 is treated as 1.
  * @param foldEnabled Whether the octave folding is applied at all. Disabling it makes `candidates`
@@ -166,7 +206,7 @@ internal class PitchTracker(
     /** Number of frames kept in [history], never below 1. */
     private val window = medianWindow.coerceAtLeast(1)
 
-    /** Frames needed to apply the folding, never below 1. */
+    /** Frames needed to hold the folding on the frames that reject it, never below 1. */
     private val confirmFrames = foldConfirmFrames.coerceAtLeast(1)
 
     /** Frames needed to drop the folding, never below 1. */
@@ -190,15 +230,6 @@ internal class PitchTracker(
 
     /** Whether the offsets are currently being folded one octave down. */
     private var foldActive = false
-
-    /**
-     * Whether the current frame asked for the folding one octave down.
-     *
-     * A frame that is out of range while this flag is set is a note above the ceiling of the range
-     * whose folded value is already inside it: the frame is held instead of discarded, so that the
-     * counters that are about to bring it into the range survive.
-     */
-    private var foldPending = false
 
     /** Consecutive frames that asked for the folding while it is not applied. */
     private var coherentFrames = 0
@@ -229,27 +260,15 @@ internal class PitchTracker(
         val raw = Notes.getOffsetFromA4(pitchHz.toDouble())
         val wasFolded = foldActive
         val applied = if (foldEnabled && candidates != null && candidates.isNotEmpty()) {
-            foldPending = isFoldWanted(raw, candidates)
-            updateFold(foldPending)
-            if (foldActive) {
-                // Only one octave is folded: A4/2 = A3 is not a string, but A4/4 = A2 is one in
-                // standard tuning, so folding by four would turn a correctly detected A4 into an
-                // "in tune" A2.
-                raw - SEMITONES_PER_OCTAVE
-            } else {
-                raw
-            }
+            val foldsWanted = isFoldWanted(raw, candidates)
+            updateFold(foldsWanted)
+            if (foldActive || foldsWanted) raw - SEMITONES_PER_OCTAVE else raw
         } else {
             clearFold()
             raw
         }
 
         if (applied < lowestNote - RANGE_TOLERANCE || applied > highestNote + RANGE_TOLERANCE) {
-            // A note above the ceiling of the range is only out of range while its octave error is
-            // being confirmed: the folded value is already inside the range. Discarding the frame
-            // would reset the counters that are about to bring it back in, so the frame is held
-            // instead: nothing is published and no state is reset.
-            if (!foldActive && foldPending) return null
             return discard()
         }
 
@@ -317,10 +336,9 @@ internal class PitchTracker(
         }
     }
 
-    /** Drops the octave folding, the counters that lead to it and the fold pending of the frame. */
+    /** Drops the octave folding and the counters that lead to it. */
     private fun clearFold() {
         foldActive = false
-        foldPending = false
         coherentFrames = 0
         releaseFrames = 0
     }
@@ -362,8 +380,21 @@ internal class PitchTracker(
         /** Number of frames the reported offset is the median of. */
         const val MEDIAN_WINDOW = 5
 
-        /** Level below which a frame is discarded: -60 dBFS, below which notes are invented. */
-        const val MIN_RMS = 1e-3f
+        /**
+         * Absolute floor of the level gate: -80 dBFS, under any room that is worth tuning in.
+         *
+         * Measured on the chain of the app —a low E with its harmonics decaying as `1/n`, through the
+         * conditioner and [be.tarsos.dsp.pitch.FastYin] at [TunerPipeline.YIN_THRESHOLD]— the
+         * detector still resolves the note on **29 of 29** frames at a frame level of `6.6e-5`
+         * (-84 dBFS), while the `1e-3` (-60 dBFS) this floor used to sit at discarded every frame
+         * under it: the last 20 dB of the note, which on the microphone of a phone against an
+         * unplugged electric guitar is the note itself. The floor stays at -80 dBFS rather than at
+         * the -84 dBFS the detector reaches, because it is also the level under which a room stops
+         * being silent, and a floor below the room buys noise rather than signal.
+         * `PipelineIntegrationTest.testNoteAtTheLevelOfTheOldGateIsDetected` pins a note at
+         * `1.96e-4` to `2.05e-4` (-74 dBFS), the level the old value lost.
+         */
+        const val MIN_RMS = 1e-4f
 
         /**
          * Difference in semitones allowed outside the detectable range on each side.
@@ -378,7 +409,7 @@ internal class PitchTracker(
         /** Distance in semitones within which a frame is considered to belong to a string. */
         const val FOLD_TOLERANCE = 0.5
 
-        /** Frames that must ask for the octave folding before it is applied. */
+        /** Frames that must ask for the octave folding before it holds on the frames that reject it. */
         const val FOLD_CONFIRM_FRAMES = 2
 
         /** Frames that must reject the octave folding before it is dropped. */

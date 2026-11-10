@@ -90,7 +90,7 @@ class Tuner internal constructor(
      * The tracker is given the range of notes the tuner can represent, so that a frame that lands
      * outside of it, such as a harmonic several octaves above the plucked string, is discarded
      * instead of moving the needle, while a note one octave above the ceiling of the range is folded
-     * onto the string it belongs to and shown after the frames the folding takes to confirm.
+     * onto the string it belongs to and shown as that string from its first frame.
      *
      * @param tuning The guitar tuning used for comparison.
      */
