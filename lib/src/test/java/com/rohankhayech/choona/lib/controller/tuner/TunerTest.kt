@@ -25,7 +25,6 @@ import com.rohankhayech.choona.lib.model.tuning.Tuning
 import com.rohankhayech.choona.lib.model.tuning.Tunings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
@@ -263,7 +262,7 @@ class TunerTest {
         val tuner = newPipelineTuner()
         val frame = frame(pitch = A4_HZ)
 
-        tuner.processPitch(frame, 1e-4f)
+        tuner.processPitch(frame, 5e-5f)
         assertNull(
             "A frame below MIN_RMS (${PitchTracker.MIN_RMS}) must not move the needle",
             tuner.noteOffset.value,
@@ -304,23 +303,16 @@ class TunerTest {
     fun testProcessPitchOctaveFold() {
         val tuner = newPipelineTuner()
         // The second harmonic of the low E2 string is an E3, which is no string of the tuning: the
-        // detector reports a note an octave high and only the folding of the tracker undoes it.
-        // The folding needs FOLD_CONFIRM_FRAMES (2) consecutive frames, so the first one is still
-        // reported as the note it was detected as and the needle only settles on the second.
+        // detector reports a note an octave high and only the folding of the tracker undoes it. The
+        // folding is applied to the frame that asks for it, so the first one is already the E2.
         val secondHarmonicOfE2 = frame(pitch = E3_HZ, probability = 0.99f)
 
         tuner.processPitch(secondHarmonicOfE2, 0.1f)
-        assertNotEquals(
-            "One frame is not enough to confirm the folding",
-            stringIndexOf("E2"),
-            tuner.selectedString.value,
-        )
-
-        tuner.processPitch(secondHarmonicOfE2, 0.1f)
         assertEquals(
-            "The folded note must be in tune with the low E",
+            "The frame that asks for the folding must be shown folded, not as the octave above the " +
+                "string",
             0.0,
-            tuner.noteOffset.value!!,
+            checkNotNull(tuner.noteOffset.value),
             0.05,
         )
         assertEquals(
@@ -328,35 +320,34 @@ class TunerTest {
             stringIndexOf("E2"),
             tuner.selectedString.value,
         )
+
+        tuner.processPitch(secondHarmonicOfE2, 0.1f)
+        assertEquals(
+            "The folded note must keep being in tune with the low E",
+            0.0,
+            tuner.noteOffset.value!!,
+            0.05,
+        )
+        assertEquals(
+            "The folded note must keep being attributed to the E2 string",
+            stringIndexOf("E2"),
+            tuner.selectedString.value,
+        )
     }
 
     @Test
-    fun testE5AboveTheRangeFoldsAfterTheConfirmFrames() {
+    fun testE5AboveTheRangeIsFoldedOnItsFirstFrame() {
         val tuner = Tuner(Tuning.STANDARD)
         // The second harmonic of the highest E string reads as +7 semitones from A4, which is above
         // the ceiling of the range (B4, +2). Its octave below is the E4 string, an octave down and
-        // inside the range, so the note is worth folding rather than dropping, but the folding needs
-        // FOLD_CONFIRM_FRAMES (2) frames: roughly 46 ms each on the window of the pipeline. The
-        // first frame is therefore held, not published and not discarded, so that the counter that
-        // confirms the folding survives to the second one.
+        // inside the range, so the note is folded rather than dropped, and the folding is applied to
+        // the frame that asks for it: the first frame of the E5 is already the E4 string, in tune.
         val e5 = frame(pitch = E5_HZ)
 
         tuner.processPitch(e5, 0.1f)
-        assertNull(
-            "An E5 must show nothing while its octave error is being confirmed, but the needle " +
-                "moved to ${tuner.noteOffset.value}",
-            tuner.noteOffset.value,
-        )
         assertEquals(
-            "A held frame must not change the selected string either",
-            0,
-            tuner.selectedString.value,
-        )
-
-        tuner.processPitch(e5, 0.1f)
-        assertEquals(
-            "The second frame confirms the folding and the E5 must be attributed to the E4 string " +
-                "it belongs to, instead of the wrong string at the end of the needle",
+            "An E5 must be attributed to the E4 string it belongs to on its first frame, instead " +
+                "of the wrong string at the end of the needle",
             stringIndexOf("E4"),
             tuner.selectedString.value,
         )
@@ -365,6 +356,13 @@ class TunerTest {
             0.0,
             checkNotNull(tuner.noteOffset.value),
             0.05,
+        )
+
+        tuner.processPitch(e5, 0.1f)
+        assertEquals(
+            "The E5 must keep being shown as the E4 string it belongs to",
+            stringIndexOf("E4"),
+            tuner.selectedString.value,
         )
     }
 
@@ -423,14 +421,18 @@ class TunerTest {
         // The margin of RANGE_TOLERANCE (1 semitone) exists for the two ends of the instrument: a
         // B4 that sits high has to be tracked, or the highest string could never be brought down.
         // Chromatic mode is used to isolate the range gate: in instrument mode a B4 is folded onto
-        // the B3 string after the frames the folding takes, which is a question of the folding and
-        // not of the range.
+        // the B3 string, which is a question of the folding and not of the range.
         val instrument = Tuner(Tuning.STANDARD)
         instrument.processPitch(frame(pitch = B4_HZ), 0.1f)
         assertEquals(
-            "A B4 is the highest note the tuner represents and must be tracked, with the needle " +
-                "at the end of its travel from the E4 string it is closest to",
-            7.0,
+            "A B4 is the highest note the tuner represents and must be tracked as the B3 string an " +
+                "octave below it, in tune",
+            stringIndexOf("B3"),
+            instrument.selectedString.value,
+        )
+        assertEquals(
+            "The B3 string an octave below the B4 must read in tune",
+            0.0,
             checkNotNull(instrument.noteOffset.value),
             0.01,
         )
