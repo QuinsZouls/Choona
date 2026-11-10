@@ -43,6 +43,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditOff
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
@@ -80,6 +81,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewDynamicColors
 import androidx.compose.ui.tooling.preview.Wallpapers.BLUE_DOMINATED_EXAMPLE
@@ -143,6 +145,7 @@ import com.rohankhayech.choona.app.R as AppR
  * @param onOpenTuningSelector Called when the user opens the tuning selector screen.
  * @param onSettingsPressed Called when the settings button is pressed.
  * @param onTapTempoPressed Called when the tap tempo button is pressed.
+ * @param onMetronomePressed Called when the metronome button is pressed.
  * @param onConfigurePressed Called when the configure tuning button is pressed.
  * @param editModeEnabled Whether tuning editing is enabled.
  * @param onEditModeChanged Called when the edit mode toggle button is pressed.
@@ -184,6 +187,7 @@ fun TunerScreen(
     onOpenTuningSelector: () -> Unit,
     onSettingsPressed: () -> Unit,
     onTapTempoPressed: () -> Unit,
+    onMetronomePressed: () -> Unit,
     onConfigurePressed: () -> Unit,
     editModeEnabled: Boolean,
     onEditModeChanged: (Boolean) -> Unit,
@@ -195,16 +199,17 @@ fun TunerScreen(
         Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             if (expanded) {
-                ExpandedAppBar(onSettingsPressed, editModeEnabled, !chromatic, onEditModeChanged, onTapTempoPressed)
+                ExpandedAppBar(onSettingsPressed, editModeEnabled, !chromatic, onEditModeChanged, onTapTempoPressed, onMetronomePressed)
             } else if (!compact) {
-                AppBar(onSettingsPressed, showEditToggle = !chromatic, editModeEnabled, onEditModeChanged, onTapTempoPressed)
+                AppBar(onSettingsPressed, showEditToggle = !chromatic, editModeEnabled, onEditModeChanged, onTapTempoPressed, onMetronomePressed)
             } else {
                 CompactAppBar(
                     scrollBehavior,
                     tuning = tuning,
                     getCanonicalName = getCanonicalName,
                     onConfigurePressed = onConfigurePressed,
-                    onTapTempoPressed = onTapTempoPressed
+                    onTapTempoPressed = onTapTempoPressed,
+                    onMetronomePressed = onMetronomePressed
                 )
             }
         }
@@ -643,6 +648,7 @@ fun TunerErrorBody(
  * @param editModeEnabled Whether tuning editing is enabled.
  * @param onEditModeChanged Called when the edit mode toggle button is pressed.
  * @param onTapTempoPressed Called when the tap tempo button is pressed.
+ * @param onMetronomePressed Called when the metronome button is pressed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -651,7 +657,8 @@ private fun AppBar(
     showEditToggle: Boolean,
     editModeEnabled: Boolean = false,
     onEditModeChanged: ((Boolean) -> Unit) = {},
-    onTapTempoPressed: () -> Unit
+    onTapTempoPressed: () -> Unit,
+    onMetronomePressed: () -> Unit
 ) {
     StatusBarColor(iconColor = StatusBarIconColor.LIGHT)
     TopAppBar(
@@ -659,7 +666,9 @@ private fun AppBar(
             Text(stringResource(R.string.app_name),
                  fontWeight = FontWeight.Bold,
                  color = if (MaterialTheme.isTrueDark && !MaterialTheme.isLight)
-                     MaterialTheme.colorScheme.primary else Color.Unspecified
+                     MaterialTheme.colorScheme.primary else Color.Unspecified,
+                 maxLines = 1,
+                 overflow = TextOverflow.Ellipsis
             )
         },
         colors = TopAppBarDefaults.topAppBarColors(
@@ -668,7 +677,7 @@ private fun AppBar(
             actionIconContentColor = contentColorFor(MaterialTheme.colorScheme.vibrantContainer)
         ),
         actions = {
-            AppBarActions(showEditToggle, editModeEnabled, onEditModeChanged, onSettingsPressed, onTapTempoPressed)
+            AppBarActions(showEditToggle, editModeEnabled, onEditModeChanged, onSettingsPressed, onTapTempoPressed, onMetronomePressed)
         }
     )
 }
@@ -680,6 +689,7 @@ private fun AppBar(
  * @param onEditModeChanged Called when the edit mode toggle button is pressed.
  * @param onSettingsPressed Called when the settings button is pressed.
  * @param onTapTempoPressed Called when the tap tempo button is pressed.
+ * @param onMetronomePressed Called when the metronome button is pressed.
  */
 @Composable
 private fun AppBarActions(
@@ -687,7 +697,8 @@ private fun AppBarActions(
     editModeEnabled: Boolean,
     onEditModeChanged: (Boolean) -> Unit,
     onSettingsPressed: () -> Unit,
-    onTapTempoPressed: () -> Unit
+    onTapTempoPressed: () -> Unit,
+    onMetronomePressed: () -> Unit
 ) {
     if (showEditToggle) {
         // Toggle tuning button
@@ -708,6 +719,9 @@ private fun AppBarActions(
     // Tap tempo button
     TapTempoAction(onClick = onTapTempoPressed)
 
+    // Metronome button
+    MetronomeAction(onClick = onMetronomePressed)
+
     // Settings button
     IconButton(onClick = onSettingsPressed) {
         Icon(Icons.Default.Settings, stringResource(R.string.tuner_settings))
@@ -727,12 +741,25 @@ private fun TapTempoAction(onClick: () -> Unit) {
 }
 
 /**
+ * Action button used to open the metronome screen.
+ *
+ * @param onClick Called when the button is pressed.
+ */
+@Composable
+private fun MetronomeAction(onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Icon(Icons.Default.GraphicEq, stringResource(R.string.metronome))
+    }
+}
+
+/**
  * App bar for the tuning screen in compact layout.
  * @param scrollBehavior Scroll behavior for the app bar.
  * @param onConfigurePressed Called when the configure tuning button is pressed.
  * @param tuning Current tuning.
  * @param getCanonicalName Gets the name of the tuning if it is saved as a custom tuning.
  * @param onTapTempoPressed Called when the tap tempo button is pressed.
+ * @param onMetronomePressed Called when the metronome button is pressed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -742,10 +769,11 @@ private fun CompactAppBar(
     tuning: TuningEntry,
     getCanonicalName: (TuningEntry.InstrumentTuning) -> String,
     onTapTempoPressed: () -> Unit,
+    onMetronomePressed: () -> Unit,
 ) {
     CenterAlignedTopAppBar(
         navigationIcon = {
-            Text(text = stringResource(R.string.app_name), modifier = Modifier.padding(start = 16.dp), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
+            Text(text = stringResource(R.string.app_name), modifier = Modifier.padding(start = 16.dp), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         },
         title = {
             TuningItem(
@@ -758,6 +786,8 @@ private fun CompactAppBar(
         },
         actions = {
             TapTempoAction(onClick = onTapTempoPressed)
+
+            MetronomeAction(onClick = onMetronomePressed)
 
             // Configure tuning button.
             IconButton(onClick = onConfigurePressed) {
@@ -775,6 +805,7 @@ private fun CompactAppBar(
  * @param showEditToggle Whether to show the edit mode toggle button.
  * @param onEditModeChanged Called when the edit mode toggle button is pressed.
  * @param onTapTempoPressed Called when the tap tempo button is pressed.
+ * @param onMetronomePressed Called when the metronome button is pressed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -783,18 +814,21 @@ private fun ExpandedAppBar(
     editModeEnabled: Boolean = false,
     showEditToggle: Boolean,
     onEditModeChanged: ((Boolean) -> Unit) = {},
-    onTapTempoPressed: () -> Unit
+    onTapTempoPressed: () -> Unit,
+    onMetronomePressed: () -> Unit
 ) {
     TopAppBar(
         title = {
             Text(stringResource(R.string.app_name),
                  fontWeight = FontWeight.Bold,
                  color = MaterialTheme.colorScheme.primary,
-                 style = MaterialTheme.typography.headlineSmall
+                 style = MaterialTheme.typography.headlineSmall,
+                 maxLines = 1,
+                 overflow = TextOverflow.Ellipsis
             )
         },
         actions = {
-            AppBarActions(showEditToggle, editModeEnabled, onEditModeChanged, onSettingsPressed, onTapTempoPressed)
+            AppBarActions(showEditToggle, editModeEnabled, onEditModeChanged, onSettingsPressed, onTapTempoPressed, onMetronomePressed)
         }
     )
 }
@@ -859,7 +893,7 @@ private fun BasePreview(
             prefs,
             canRequest = canRequest,
             error = error,
-            {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+            {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
             editModeEnabled = true,
             onEditModeChanged = {},
             onRequestPermission = {},

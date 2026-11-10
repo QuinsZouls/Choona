@@ -38,16 +38,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.scene.DialogSceneStrategy
 import androidx.navigation3.ui.NavDisplay
 import com.rohankhayech.android.util.ui.theme.m3.isLight
 import com.rohankhayech.android.util.ui.theme.m3.isTrueDark
+import com.rohankhayech.choona.lib.controller.metronome.MetronomePlayer
 import com.rohankhayech.choona.lib.controller.tunings.TuningList
 import com.rohankhayech.choona.lib.model.preferences.InitialTuningType
 import com.rohankhayech.choona.lib.model.preferences.TunerPreferences
@@ -55,6 +61,7 @@ import com.rohankhayech.choona.lib.model.tuning.Instrument
 import com.rohankhayech.choona.lib.model.tuning.Tuning
 import com.rohankhayech.choona.lib.model.tuning.TuningEntry
 import com.rohankhayech.choona.lib.view.viewmodel.EditTuningViewModel
+import com.rohankhayech.choona.lib.view.viewmodel.MetronomeViewModel
 import com.rohankhayech.choona.lib.view.viewmodel.TapTempoViewModel
 import com.rohankhayech.choona.lib.view.viewmodel.TunerViewModel.Screen
 
@@ -96,6 +103,7 @@ import com.rohankhayech.choona.lib.view.viewmodel.TunerViewModel.Screen
  * @param onOpenTuningSelector Called when the user opens the tuning selector screen.
  * @param onSettingsPressed Called when the settings button is pressed.
  * @param onTapTempoPressed Called when the tap tempo button is pressed.
+ * @param onMetronomePressed Called when the metronome button is pressed.
  * @param onConfigurePressed Called when the configure tuning button is pressed.
  * @param onSelectTuningFromList Called when a tuning is selected from the selection panel.
  * @param onSelectChromaticFromList Called when the chromatic mode is selected from the selection panel.
@@ -146,6 +154,7 @@ fun MainLayout(
     onOpenTuningSelector: () -> Unit,
     onSettingsPressed: () -> Unit,
     onTapTempoPressed: () -> Unit,
+    onMetronomePressed: () -> Unit,
     onConfigurePressed: () -> Unit,
     onSelectTuningFromList: (Tuning) -> Unit,
     onSelectChromaticFromList: () -> Unit,
@@ -209,6 +218,7 @@ fun MainLayout(
                     onOpenTuningSelector,
                     onSettingsPressed,
                     onTapTempoPressed,
+                    onMetronomePressed,
                     onConfigurePressed,
                     editModeEnabled,
                     onEditModeChanged,
@@ -284,6 +294,43 @@ fun MainLayout(
                     onReset = tapTempoVM::reset,
                     onDoubleTempo = tapTempoVM::doubleTempo,
                     onHalveTempo = tapTempoVM::halveTempo,
+                    onDismiss = onBack,
+                )
+            }
+
+            entry<Screen.Metronome>(
+                metadata = NavDisplay.transitionSpec {
+                    slideIntoContainer(SlideDirection.Up) togetherWith fadeOut()
+                } + NavDisplay.popTransitionSpec {
+                    fadeIn() togetherWith slideOutOfContainer(SlideDirection.Down)
+                } + NavDisplay.predictivePopTransitionSpec {
+                    fadeIn() togetherWith slideOutOfContainer(SlideDirection.Down)
+                }
+            ) {
+                val appContext = LocalContext.current.applicationContext
+                val factory = remember(appContext) {
+                    viewModelFactory {
+                        initializer { MetronomeViewModel(engineFactory = { MetronomePlayer(appContext) }) }
+                    }
+                }
+                val metronomeVM: MetronomeViewModel = viewModel(factory = factory)
+                val metronomeState by metronomeVM.state.collectAsStateWithLifecycle()
+                val metronomeError by metronomeVM.error.collectAsStateWithLifecycle()
+
+                // The click must not keep playing once the app is no longer visible: there is no
+                // notification and no foreground service, so nothing else could stop it.
+                LifecycleEventEffect(Lifecycle.Event.ON_STOP) { metronomeVM.stop() }
+
+                MetronomeScreen(
+                    state = metronomeState,
+                    pulses = metronomeVM.pulses,
+                    error = metronomeError,
+                    onBpmChange = metronomeVM::setBpm,
+                    onAdjustBpm = metronomeVM::adjustBpm,
+                    onBeatsPerBarChange = metronomeVM::setBeatsPerBar,
+                    onAccentChange = metronomeVM::setAccentFirstBeat,
+                    onToggle = metronomeVM::toggle,
+                    onTap = metronomeVM::tap,
                     onDismiss = onBack,
                 )
             }

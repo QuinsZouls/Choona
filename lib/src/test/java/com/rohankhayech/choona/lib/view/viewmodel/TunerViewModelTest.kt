@@ -86,6 +86,20 @@ class TunerViewModelTest {
     }
 
     @Test
+    fun testOpenMetronome() {
+        vm.openMetronome()
+        assertTrue(vm.backStack.size == 2)
+        assertTrue(vm.backStack.last() == Screen.Metronome)
+
+        vm.openMetronome()
+        assertTrue(vm.backStack.size == 2)
+
+        vm.navBack()
+        assertTrue(vm.backStack.size == 1)
+        assertTrue(vm.backStack.last() == Screen.Tuner)
+    }
+
+    @Test
     fun testNavBack() {
         vm.openTuningSelector()
         vm.navBack()
